@@ -1,0 +1,292 @@
+/************************************************************************************/
+/*						   WINDOWS File Access Source.								*/
+/*	    				   ---------------------------								*/
+/*  					   (c) 2008 by Stephen Fraser								*/
+/*																					*/
+/* Contains the Windows-Specific code to handle data files							*/
+/*																					*/
+/* Must provide the following Interfaces:											*/
+/*	class cDerivedOS_Archive : public cFileArchive;	// Class for handling files		*/
+/*	cFileArchive *initOS_Archive(void);				// Returns a pointer to class	*/
+/*																					*/
+/*---------------------------  L I C E N S E  --------------------------------*/
+/*  This file has been released under a GPL 2 license                         */
+/******************************************************************************/
+#include "../fc_h.h"
+
+#include <fcntl.h>			// Needed for File Operations
+#include <sys/stat.h>		// Needed for File system flags
+#include <errno.h>			// Needed for reporting disk errors
+
+#include <io.h>				// Windows Only: Needed for File Operations
+#include <direct.h>			// Windows Only: Needed to access directories
+
+#define maxDirHandles 5
+
+#ifdef __MSVC__
+#pragma warning(disable : 4996)		// Needed for MSVC 2008
+#endif // __MSVC__
+
+struct sWinOS_DirHandle
+{	_finddata_t	finddata_t;
+	char		findDataPath[256];
+	uintf		inuse;		// 0 = This Directory Handle is free, 1 = Just allocated, not yet used, 2 = Allocated and in use
+};
+
+struct sWinOS_Handle
+{	// Must not exceed the byte size of sFileHandle in any way!
+	void				*arc_class;	// We can ignore this, it will be equal to 'this'
+	int					handle;		// Standard Windows Handle
+	sWinOS_DirHandle	*dirHandle;	// Data structure used to search directories
+};
+
+int		WinOS_BogusData;	// Needed to give us something to point to
+
+class cWinOS_Archive : public cFileArchive
+{	public:
+		sWinOS_DirHandle	dirHandle[maxDirHandles];
+
+					~cWinOS_Archive(void);
+		void		*fileExists(const char *filename);
+		sFileHandle *open(const char *filename);
+		sFileHandle *create(const char *filename);
+		sFileHandle *openRW(const char *filename);
+		int64		seek(sFileHandle *handle, int64 offset, uintf seekflags);
+		uintf		read(sFileHandle *handle, void *buf, uintf size);
+		uintf		write(sFileHandle *handle, void *buf, uintf size);
+		void		close(sFileHandle *);
+		uintf		getFileSize(const char *filename);
+		sFileHandle	*openDir(const char *path);
+		bool		readDir(sFileHandle *handle, sDirectoryData *dir);
+		void		closeDir(sFileHandle *handle);
+};
+
+void	*cWinOS_Archive::fileExists(const char *filename)
+{	int temphandle;
+	temphandle=_open(filename, O_RDONLY | O_BINARY);
+	if (temphandle!=-1)
+	{	_close(temphandle);
+		return(&WinOS_BogusData);
+	}	else
+	return NULL;
+
+}
+
+sFileHandle *cWinOS_Archive::open(const char *filename)
+{	int handle = _open(filename, O_RDONLY | O_BINARY);
+	if (handle==-1) return NULL;
+
+	sFileHandle *genHandle = allocArcHandle();
+	sWinOS_Handle *winHandle = (sWinOS_Handle *)genHandle;
+	winHandle->arc_class = this;
+	winHandle->handle=handle;
+	return genHandle;
+}
+
+sFileHandle *cWinOS_Archive::create(const char *filename)
+{	int handle = _open(filename, O_TRUNC | O_CREAT | O_WRONLY | O_BINARY, S_IREAD | S_IWRITE);
+    if (handle==-1) return NULL;
+
+	sFileHandle *genHandle = allocArcHandle();
+	sWinOS_Handle *winHandle = (sWinOS_Handle *)genHandle;
+	winHandle->arc_class = this;
+	winHandle->handle=handle;
+	return genHandle;
+}
+
+
+sFileHandle *cWinOS_Archive::openRW(const char *filename)
+{	int flags =  O_BINARY | O_RDWR;
+	if (!fileExists(filename)) flags |= O_CREAT | O_TRUNC;
+	int handle = _open(filename, flags, S_IREAD | S_IWRITE);
+    if (handle==-1) return NULL;
+
+	sFileHandle *genHandle = allocArcHandle();
+	sWinOS_Handle *winHandle = (sWinOS_Handle *)genHandle;
+	winHandle->arc_class = this;
+	winHandle->handle=handle;
+	return genHandle;
+}
+
+int64 cWinOS_Archive::seek(sFileHandle *genHandle, int64 offset, uintf seekflags)
+{	int handle = ((sWinOS_Handle *)genHandle)->handle;
+	switch (seekflags)
+	{	case seek_fromstart:	return _lseeki64(handle,offset,SEEK_SET); break;
+		case seek_fromcurrent:	return _lseeki64(handle,offset,SEEK_CUR); break;
+		case seek_fromend:		return _lseeki64(handle,offset,SEEK_END); break;
+		default: msg("Disk Error","Invalid Seek flags");
+	}
+	return 0;
+}
+
+uintf cWinOS_Archive::read(sFileHandle *genHandle, void *buf, uintf size)
+{	int handle = ((sWinOS_Handle *)genHandle)->handle;
+	int readsize=_read(handle,buf,size);
+	if (readsize==-1)
+	{	msg("Disk Error","Error reading file");
+	}
+	filesize=readsize;
+	return (uintf)readsize;
+}
+
+uintf cWinOS_Archive::write(sFileHandle *genHandle, void *buf, uintf size)
+{	int handle = ((sWinOS_Handle *)genHandle)->handle;
+	uintf flsize;
+	const char *errrep = "Unknown Error";
+	if (size==0)
+	{	filesize = 0;
+		return 0;
+	}
+	flsize=_write(handle,buf,size);
+    if (flsize!=size)
+    {	if (errno==EBADF) errrep="Bad File Handle";
+		if (errno==ENOSPC) errrep="Not Enough Space";
+		if (errno==EINVAL) errrep="Invalid Arguments";
+		msg("Disk Error",buildstr("Handle %x (size was %i, should have been %i)\nReason Given = %s (%i)\nSource Pointer %x, Size = %i\nError writing file ",handle,flsize,size,errrep,errno,buf,size));
+    }
+	filesize=flsize;
+    return (flsize);
+}
+
+void cWinOS_Archive::close(sFileHandle *genHandle)
+{	int handle = ((sWinOS_Handle *)genHandle)->handle;
+	_close(handle);
+	freeArcHandle(genHandle);
+}
+
+uintf cWinOS_Archive::getFileSize(const char *filename)
+{	long handle = _open(filename, O_RDONLY | O_BINARY);
+	filesize = (uintf)_lseeki64(handle,0,SEEK_END);
+	_close(handle);
+	return filesize;
+}
+
+sFileHandle	*cWinOS_Archive::openDir(const char *path)
+{	// allocate a DirHandle
+	sWinOS_DirHandle *useHandle = NULL;
+	for (uintf i=0; i<maxDirHandles; i++)
+	{	if (dirHandle[i].inuse==0)
+		{	useHandle = &dirHandle[i];
+			useHandle->inuse = 1;
+			break;
+		}
+	}
+	if (!useHandle) return NULL;
+
+	sFileHandle *genHandle = allocArcHandle();
+	sWinOS_Handle *arcHandle = (sWinOS_Handle *)genHandle;
+
+	arcHandle->dirHandle = useHandle;
+	tprintf(useHandle->findDataPath, 256, "%s/*.*",path);
+	return genHandle;
+}
+
+void fileError(const char *caller)
+{	const char *errTxt;
+	switch (errno)
+	{	case EINVAL:	errTxt = "EINVAL (Invalid paramete)"; break;
+		case EPERM:		errTxt = "EPERM (Operation not permitted)"; break;
+		case ENOENT:	errTxt = "ENOENT (No such file or directory)"; break;
+		case ESRCH:		errTxt = "ESRCH (No such process)"; break;
+		case EINTR:		errTxt = "EINTR (Interrupted function)"; break;
+		case EIO:		errTxt = "EIO (I/O error)"; break;
+		case ENXIO:		errTxt = "ENXIO (No such device or address)"; break;
+		case E2BIG:		errTxt = "E2BIG (Argument list too long)"; break;
+		case ENOEXEC:	errTxt = "ENOEXEC (Exec format error)"; break;
+		case EBADF:		errTxt = "EBADF (Bad file number)"; break;
+		case ECHILD:	errTxt = "ECHILD (No spawned processes)"; break;
+		case EAGAIN:	errTxt = "EAGAIN (No more processes or not enough memory or maximum nesting level reached)"; break;
+		case ENOMEM:	errTxt = "ENOMEM (Not enough memory)"; break;
+		case EACCES:	errTxt = "EACCES (Permission denied)"; break;
+		case EFAULT:	errTxt = "EFAULT (Bad address)"; break;
+		case EBUSY:		errTxt = "EBUSY (Device or resource busy)"; break;
+		case EEXIST:	errTxt = "EEXIST (File exists)"; break;
+		case EXDEV:		errTxt = "EXDEV (Cross-device link)"; break;
+		case ENODEV:	errTxt = "ENODEV (No such device)"; break;
+		case ENOTDIR:	errTxt = "ENOTDIR (Not a directory)"; break;
+		case EISDIR:	errTxt = "EISDIR (Is a directory)"; break;
+		case ENFILE:	errTxt = "ENFILE (Too many files open in system)"; break;
+		case EMFILE:	errTxt = "EMFILE (Too many open files)"; break;
+		case ENOTTY:	errTxt = "ENOTTY (Inappropriate I/O control operation)"; break;
+		case EFBIG:		errTxt = "EFBIG (File too large)"; break;
+		case ENOSPC:	errTxt = "ENOSPC (No space left on device)"; break;
+		case ESPIPE:	errTxt = "ESPIPE (Invalid seek)"; break;
+		case EROFS:		errTxt = "EROFS (Read-only file system)"; break;
+		case EMLINK:	errTxt = "EMLINK (Too many links)"; break;
+		case EPIPE:		errTxt = "EPIPE (Broken pipe)"; break;
+		case EDOM:		errTxt = "EDOM (Math argument)"; break;
+		case ERANGE:	errTxt = "ERANGE (Result too large)"; break;
+		case EDEADLK:	errTxt = "EDEADLK (Resource deadlock would occur)"; break;
+		case ENAMETOOLONG:errTxt = "ENAMETOOLONG (Filename too long)"; break;
+		case ENOLCK:	errTxt = "ENOLCK (No locks available)"; break;
+		case ENOSYS:	errTxt = "ENOSYS (Function not supported)"; break;
+		case ENOTEMPTY:	errTxt = "ENOTEMPTY (Directory not empty)"; break;
+		case EILSEQ:	errTxt = "EILSEQ (Illegal byte sequence)"; break;
+//		case STRUNCATE:	errTxt = "STRUNCATE (String was truncated)"; break;
+		default: errTxt = "Unknown error (An error code was returned that does not exist in the platform's documentation)"; break;
+	}
+	msg("File error",buildstr("An error occured in '%s'\n%s",caller,errTxt));
+}
+
+bool cWinOS_Archive::readDir(sFileHandle *genHandle, sDirectoryData *dir)
+{	sWinOS_Handle *arcHandle = (sWinOS_Handle *)genHandle;
+	sWinOS_DirHandle *findHandle = arcHandle->dirHandle;
+
+	bool retry = true;
+	while (retry)
+	{	switch(findHandle->inuse)
+		{	case 0:								// This handle has not been allocated!
+				return false;
+
+			case 1:								// This is our first read
+				arcHandle->handle = _findfirst((char *)findHandle->findDataPath, &findHandle->finddata_t);
+				if (arcHandle->handle==-1)
+				{	fileError("readDir");
+					return false;				// Path not found
+				}
+				findHandle->inuse = 2;
+				break;
+
+			case 2:								// This is a subsequent read
+				if (_findnext(arcHandle->handle, &findHandle->finddata_t)!=0) return false;
+				break;
+
+			default:							// Error condition - unknown 'inuse' value
+				return false;
+		}
+		retry = false;
+		if (txtcmp(findHandle->finddata_t.name,".")==0) retry = true;
+		if (txtcmp(findHandle->finddata_t.name,"..")==0) retry = true;
+	}
+	txtcpy((char *)dir->filename,sizeof(dir->filename), findHandle->finddata_t.name);
+	dir->size = findHandle->finddata_t.size;
+	dir->flags = 0;
+	uintf attrib = findHandle->finddata_t.attrib;
+	if (attrib & _A_HIDDEN) dir->flags |= dirFlag_Hidden;
+	if (attrib & _A_RDONLY) dir->flags |= dirFlag_ReadOnly;
+	if (attrib & _A_SUBDIR) dir->flags |= dirFlag_Directory;
+	return true;
+}
+
+void cWinOS_Archive::closeDir(sFileHandle *genHandle)
+{	sWinOS_Handle *arcHandle = (sWinOS_Handle *)genHandle;
+	sWinOS_DirHandle *findHandle = arcHandle->dirHandle;
+	if (findHandle->inuse>0)
+	{	_findclose(arcHandle->handle);
+		findHandle->inuse = 0;
+	}
+	freeArcHandle(genHandle);
+}
+
+cWinOS_Archive::~cWinOS_Archive(void)
+{
+}
+
+cFileArchive *initOS_Archive(void)
+{	if (sizeof(sWinOS_Handle) > sizeof(sFileHandle))
+		msg("Structure Size Error","sWinOS_Handle exceeds the size of sFileHandle!");
+	cWinOS_Archive *arc = new cWinOS_Archive;
+	for (uintf i=0; i<maxDirHandles; i++)
+		arc->dirHandle[i].inuse = 0;
+	return arc;
+}

@@ -1,0 +1,21 @@
+Starting Trace on D3D.
+All scores indicate how well your video card can display FC Engine applications
+
+Intel(R) Haswell Mobile detected
+  This adapter scored 14/15 points for it's texture format support
+  A score of less than 15/15 may lead to a minor color detail loss
+  This adapter scored 70/70 points for it's texture blending support
+  This adapter scored  5/ 5 points for it's hardware Transform & Lighting support
+  This adapter scored  5/ 5 points for it's bump mapping support
+  This adapter scored  5/ 5 points for it's support of programmable pixel shaders
+  This adapter received a rating of 99/100
+
+Selected Intel(R) Haswell Mobile
+Initializing adapter in windowed mode
+Utilising 24 bits for depth buffering, and 8 bits for a stencil buffer
+No hardware T&L functionality was found, attempting software T&L instead
+Hardware transform and lighting detected and utilized.
+Enabling Z based Depth Buffer
+
+Shutting down 3D system
+Exiting Video Driver

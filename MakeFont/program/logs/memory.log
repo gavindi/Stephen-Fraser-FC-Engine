@@ -1,0 +1,18 @@
+5a10e0 Allocated Z Buckets for 3D Renderer (180224 bytes) in cell 0
+6b18f0 Allocated createobj (284 bytes) in cell 1
+6b1810 Allocated Material Billboard (200 bytes) in cell 2
+5cd0f8 Allocated Input_File.pcx (6583 bytes) in cell 3
+6b16a0 Allocated PCX image (Garbage Collection Buffer) (320 bytes) in cell 4
+5ceac0 Allocated Create Bitmap (65052 bytes) in cell 5
+6b16a0 Freed (cell 4)
+5cd0f8 Freed (cell 3)
+101c020 Allocated font buffer (1048576 bytes) in cell 3
+6b1810 Freed (cell 2)
+6b18f0 Freed (cell 1)
+5a10e0 Freed (cell 0)
+
+----------------------------------------------------------
+101c020 Freed (cell 3)
+5ceac0 Freed (cell 5)
+
+2 blocks of memory were not freed.

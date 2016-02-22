@@ -1,0 +1,810 @@
+/************************************************************************************/
+/*						   FC_WIN Program header file.								*/
+/*	    				   ---------------------------								*/
+/*  					   (c) 1998-2002 by Stephen Fraser							*/
+/*																					*/
+/* Contains the required functions for running FC under Windows 95 and above.		*/
+/*																					*/
+/* FC Win requires the following .LIB files:										*/
+/*	 user32.lib winmm.lib  ole32.lib dsound.lib ddraw.lib dxguid.lib dinput.lib		*/
+/*		             																*/
+/* Must provide the following Interfaces:											*/
+/*	void msg( const char *title, const char *thismessage );							*/
+/*	void setProgramName(const char *name);											*/
+/*	void stamptime(vlong *dest);													*/
+/*	bool associatefile(	const char *extension,const char *ownerprogram,				*/
+/*						const char *filedescription,bool *permission);				*/
+/*	void setFileDropCallback(void (*callback)(	const char *filename,				*/
+/*												intf x, intf y));					*/
+/*	void checkmsg(void);															*/
+/*	void waitmsg(void);																*/
+/*	void setTimerTask(void taskadr(void),intf ticks);								*/
+/*	void exitfc(void);																*/
+/*	void startupwarning(const char *title, const char *message);					*/
+/*	void showmouse(bool show);														*/
+/*	sDynamicLib *loadDynamicLib(char *filename);									*/
+/*	void freeDynamicLib(sDynamicLib *library);										*/
+/*																					*/
+/* In addition, it must provide startup code which performs the following tasks:	*/
+/*	Initialize Command Line strings within FCLAUNCH.CPP								*/
+/*		*cmdline, runpath[], programflname[], programName[]							*/
+/*	Create the 'logs' folder, and delete logs/exit.log								*/
+/*	Count CPUs, store in numCPUs													*/
+/*	Initialize desktopMetrics														*/
+/*	Initialize system timer to 100Hz, call fcTimerTick whenever interrupt occurs	*/
+/*	Initialize Timestamp system														*/
+/*	call fclaunch()																	*/
+/*	Once fclaunch returns, it must perform a clean shutdown, and display any error	*/
+/*																					*/
+/*------------------------------  W A R N I N G  -----------------------------------*/
+/*  This source file is only for the use of Stephen Fraser.  Any other use without	*/
+/* my express permission may result in legal action being taken!					*/
+/************************************************************************************/
+
+// Services offered by other header files not yet included
+#include <stdio.h>
+#include <stdlib.h>				// Required for exit function
+#include <errno.h>				// Required for file error handling
+
+#include <X11/Xlib.h>
+#include <X11/extensions/xf86vmode.h>
+#include <X11/keysym.h>
+#include <sys/time.h>		// Needed for System Timer
+#include <sys/stat.h>		// mkdir
+#include <unistd.h>			// getCWD
+#include <signal.h>			// Needed for System Timer
+#include "../fc_h.h"		// Standard FC includes
+#include "fc_linux.h"
+
+/*
+#include <eh.h>				// needed for set_terminate
+*/
+
+// Variables
+sLinuxVars			linuxVars;										// Shared variables used by Windows-specific code
+sScreenMetrics		_desktopMetrics;								// Desktop width, height, and depth
+/*
+uintf				win32_HwndTotalWidth, win32_HwndTotalHeight;	// Display Window size (including window frame)
+terminate_function	old_term_function;
+UINT				timerid;			// ID number of the main application timer
+*/
+
+// Callback Functions
+void	(*FileDropCallback)(const char *filename, intf x, intf y);	// Callback used when a file is dropped on the window.  X and Y indicate the point where the files were dropped.  If X<0, then the drop's position is unknown (maybe it was faked via another application)
+extern  void	(*OSclose_callback)(void);
+
+extern	uintf	OS_cacheMouseX,OS_cacheMouseY;
+extern	intf	OS_cacheMouseBut;
+extern	intf	OS_cacheMouseWheel;
+/*
+void setFileDropCallback(void (*callback)(const char *filename, intf x, intf y))
+{	FileDropCallback = callback;
+	if (callback)
+	{	DragAcceptFiles(winVars.mainWin, true);
+	} else
+	{	DragAcceptFiles(winVars.mainWin, false);
+	}
+}
+
+// Close the window, and Terminate the entire FC system
+void __cdecl term_func(void)
+{	timeKillEvent(timerid);
+	CoUninitialize();
+#ifndef STATICDRIVERS
+	freeLoadedPlugin(videoDriverPlugin);
+#endif
+	if (winVars.mainWin)
+	{	DestroyWindow(winVars.mainWin);
+		winVars.mainWin = NULL;
+	}
+}
+
+*/
+void msg(const char *heading, const char*message)
+{	printf("---------- MSG -----------------\n");
+	printf("Fatal Error: %s\n",heading);
+	printf("Error Details: %s\n",message);
+	exit(1);
+}
+/*
+// ------------------------------ msg API function ------------------------------------------
+void msg( const char *title, const char *thismessage )
+{	// Exits the application and displays a message box to explain why it exited
+	char thistitle[256];
+	char thismsg[512];
+	char currentdir[256];
+	_getcwd(currentdir,256);
+	txtcpy(thistitle,sizeof(thistitle),title);
+	txtcpy(thismsg,sizeof(thismsg),thismessage);
+	_exitfc();
+
+	showMouse(true);
+	logfile *log = newlogfile("logs\\exit.log");
+	log->log(thistitle);
+	log->log(thismsg);
+	log->log("CWD: %s",currentdir);
+	delete log;
+	term_func();
+	MessageBox(NULL,buildstr("%s\nCWD: %s",thismsg,currentdir),thistitle,MB_OK | MB_ICONEXCLAMATION );
+	exit(1);
+}
+*/
+
+uintf numTimerMsgs = 0;
+
+//extern	uintf	OS_cacheMouseX,OS_cacheMouseY;
+//extern	intf	OS_cacheMouseBut;
+//extern	intf	OS_cacheMouseWheel;
+
+intf mouseButtonRemap[] = { 0, 1, 4, 2, 0, 0, 8, 16, 32, 64, 128, 256};
+
+void handleEvent(XEvent *event)
+{	char *atomName;
+	switch (event->type)
+	{	case Expose:
+			break;
+		case ConfigureNotify:
+			break;
+
+		// Mouse Handling
+		case ButtonPress:
+		{	XButtonEvent *e = (XButtonEvent *)event;
+			int btn = e->button;
+			if (btn>0 && btn<12)
+			{	if (btn==4) OS_cacheMouseWheel++;
+					else
+				if (btn==5) OS_cacheMouseWheel--;
+					else
+				OS_cacheMouseBut |= mouseButtonRemap[btn];
+			}
+			break;
+		}
+		case ButtonRelease:
+		{	XButtonEvent *e = (XButtonEvent *)event;
+			int btn = e->button;
+			if (btn>0 && btn<12)
+				OS_cacheMouseBut &=~mouseButtonRemap[btn];
+			break;
+		}
+		case MotionNotify:
+		{	XMotionEvent *m = (XMotionEvent *)event;
+			OS_cacheMouseX = m->x;
+			OS_cacheMouseY = m->y;
+			// printf("MousePos = %i,%i\n",OS_cacheMouseX,OS_cacheMouseY);
+			break;
+		}
+
+		// Keyboard Handling
+		case KeyPress:
+			printf("KeyHit: %i\n",event->xkey.keycode);
+			keyhit(event->xkey.keycode);
+			break;
+		case KeyRelease:
+			printf("KeyRelease: %i\n",event->xkey.keycode);
+			keyrelease(event->xkey.keycode);
+			break;
+
+		case ClientMessage:
+			atomName = XGetAtomName(linuxVars.dpy, event->xclient.message_type);
+			//if (txtcmp(atomName,"MyTimer")==0)
+			//{	printf("ClientMessage: MyTimer %i\n",numTimerMsgs++);
+			//}	else
+			//printf("ClientMessage: %s\n",atomName);
+			break;
+		default:
+			break;
+	}
+}
+/*
+// WindowProc --- Handles messages for the main application window
+LRESULT FAR PASCAL WindowProc( HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam )
+{   //PAINTSTRUCT ps;
+	RECT clientRect;
+
+	switch( message )
+    {
+		case WM_CREATE:
+			applicationState = AppState_running;
+			break;
+
+		case WM_ACTIVATE:
+			// Program may be becomming active for the first time, or an ALT-TAB may have occured
+
+			// Reset keyboard
+			for (uintf i=0; i<input->numKeyboards; i++)
+			{	sKeyboard *k = &input->keyboard[i];
+				memfill(&k->keyDown,0,sizeof(k->keyDown));
+				k->keyReady = 0;
+			}
+
+			winVars.factive = LOWORD(wParam);		// activation flag
+			if(LOWORD(wParam) == WA_INACTIVE)
+			{	applicationState = AppState_notFocused;
+				if (winVars.deactivate) winVars.deactivate();
+			}
+			else
+			{	// Switching back to window
+				applicationState = AppState_running;
+			}
+			break;
+
+		case WM_MOVE:
+			// The app's window has been moved
+			winVars.winPosX = (intf)((uint16)LOWORD(lParam));
+			winVars.winPosY = (intf)((uint16)HIWORD(lParam));
+
+			GetClientRect( winVars.mainWin, &clientRect );
+		    ClientToScreen( winVars.mainWin, (POINT*)&clientRect );
+			ClientToScreen( winVars.mainWin, (POINT*)&clientRect+1 );
+			winmove((intf)clientRect.left, (intf)clientRect.top,
+					(intf)clientRect.right,(intf)clientRect.bottom);
+			break;
+
+		case WM_KEYDOWN:
+        case WM_SYSKEYDOWN:
+			// A key has been pressed
+            switch (wParam)
+			{	case 16 : if (lParam & 0x100000) keyhit(21);
+            								else keyhit(16);
+						  break;
+        		case 17 : if (lParam & 0x1000000)keyhit(22);
+        									else keyhit(17);
+						  break;
+				case 18 : if (lParam & 0x1000000)keyhit(23);
+        									else keyhit(18);
+						  break;
+				default : keyhit((int)wParam);
+			}
+			break;
+
+		case WM_KEYUP:
+        case WM_SYSKEYUP:
+			// A key has been released
+            switch (wParam)
+			{	case 16 : keyrelease(16); keyrelease(21); break;	// If it's a CTRL, SHIFT, or ALT key,
+				case 17 : keyrelease(17); keyrelease(22); break;	// we can't tell if it's the LEFT or RIGHT one being released
+				case 18 : keyrelease(18); keyrelease(23); break;	// so to be safe, both are released together
+				default : keyrelease((int)wParam);
+			}
+			break;
+
+		case WM_PAINT:
+			// We don't really care about WM_PAINT for fullscreen apps, so ignore it
+			ValidateRect( hWnd, NULL );
+			//if (BeginPaint( hWnd, &ps ))
+			//	EndPaint( hWnd, &ps );
+			break;
+
+		// Handle mouse button events.  Mouse position is handled in the getmouse function
+		case WM_LBUTTONDOWN:
+		case WM_LBUTTONUP:
+		case WM_RBUTTONDOWN:
+		case WM_RBUTTONUP:
+		case WM_MBUTTONDOWN:
+		case WM_MBUTTONUP:
+			if (winVars.factive==WA_ACTIVE)
+            {	OS_cacheMouseBut=0;
+				if (wParam & MK_LBUTTON) OS_cacheMouseBut++;
+				if (wParam & MK_RBUTTON) OS_cacheMouseBut+=2;
+				if (wParam & MK_MBUTTON) OS_cacheMouseBut+=4;
+			}
+			break;
+		case WM_MOUSEMOVE:
+			if (winVars.factive==WA_ACTIVE)
+			{	if (winVars.isWindowMode)
+				{	OS_cacheMouseX = LOWORD(lParam);
+					OS_cacheMouseY = HIWORD(lParam);
+				}	else
+				{	POINT mousepos;
+					GetCursorPos(&mousepos);
+					OS_cacheMouseX=mousepos.x;
+					OS_cacheMouseY=mousepos.y;
+				}
+			}
+			break;
+		case WM_MOUSEWHEEL:
+			if (winVars.factive==WA_ACTIVE)
+			{	OS_cacheMouseWheel += (short)HIWORD(wParam)/120;
+			}
+			break;
+
+		case WM_DROPFILES:
+			SetActiveWindow(hWnd);
+			if (FileDropCallback)
+			{	HDROP drop = (HDROP)wParam;
+				POINT droppoint;
+				char buf[256];
+				BOOL clientarea = DragQueryPoint(drop, &droppoint);
+				uintf numfiles = DragQueryFile(drop, 0xFFFFFFFF, buf, 256);
+				for (uintf i=0; i<numfiles; i++)
+				{	DragQueryFile(drop, i, buf, 256);
+					FileDropCallback(buf, droppoint.x, droppoint.y);
+				}
+			}
+			break;
+
+		case WM_TIMERTICK:				// This is a dummy message to keep things rolling
+			break;
+
+		case WM_CLOSE:
+			// User has requested that the FC Engine's window be closed
+			OS_close++;
+			keyhit(15);
+			if (OSclose_callback)
+				OSclose_callback();
+			break;
+
+		// Window is resized.
+		case WM_SIZE:
+			if (winVars.changeSize) winVars.changeSize(LOWORD(lParam), HIWORD(lParam));		// Call our function which modifies the clipping volume and viewport
+			break;
+
+		case WM_DESTROY:
+			// FC handles it's own exiting ... so do nothing here
+			break;
+		default:
+			return DefWindowProc(hWnd, message, wParam, lParam);
+	}
+    return 1;
+}
+
+
+void win32CreateWindow(uintf width, uintf height, uintf depth)
+{	// Create the main working window
+//  	WNDCLASS    wc;
+	HICON		appicon;												// The applications icon
+
+	appicon = LoadIcon( winVars.hinst, MAKEINTRESOURCE(101));			// 101 = first resource in resource file
+	if (!appicon) appicon = LoadIcon( winVars.hinst, IDI_APPLICATION);
+	// Register program's window class
+//	wc.style		 = 0;
+//	wc.lpfnWndProc	 = winVars.winProc;
+//	wc.cbClsExtra	 = 0;
+//	wc.cbWndExtra	 = 0;
+//	wc.hInstance	 = winVars.hinst;
+//	wc.hIcon		 = appicon;
+//	wc.hCursor		 = LoadCursor( NULL, IDC_ARROW );
+//	wc.hbrBackground = (HBRUSH)COLOR_INACTIVEBORDER;
+//	wc.lpszMenuName  = NULL;
+//	wc.lpszClassName = "FlameVM_WinClass";
+//	if (!RegisterClass( &wc ))
+//        win32Error("Register Window Class");
+
+	// Create Client Application's Window
+	DWORD winexstyle = 0;
+	DWORD winstyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+	if (winVars.parentWin) winstyle = WS_POPUP;
+
+	win32_HwndTotalWidth = width;
+	win32_HwndTotalHeight = height;
+	if (depth==0)
+	{	win32_HwndTotalWidth  += GetSystemMetrics(SM_CXSIZEFRAME)*2;
+		win32_HwndTotalHeight += GetSystemMetrics(SM_CYSIZEFRAME)*2 + GetSystemMetrics(SM_CYCAPTION);
+	}
+
+	RECT workarea;
+	SystemParametersInfo(SPI_GETWORKAREA, 0, &workarea, 0);
+
+	winVars.mainWin =
+		CreateWindowEx(
+			winexstyle,
+			winVars.wc.lpszClassName,
+			programName,
+			winstyle,
+			((workarea.right-workarea.left) - win32_HwndTotalWidth) / 2,		// X
+			((workarea.bottom-workarea.top) - win32_HwndTotalHeight) / 2,		// Y
+			win32_HwndTotalWidth, win32_HwndTotalHeight,
+			winVars.parentWin, NULL,
+			winVars.hinst,
+			NULL );
+
+    if( winVars.mainWin == NULL )
+        win32Error("Create the program's window");
+
+	ShowWindow(winVars.mainWin,winVars.cmdShow);
+	UpdateWindow(winVars.mainWin);
+}
+
+// Set the name of the program (window title)
+void setProgramName(const char *name)
+{	txtcpy(programName, 128, name);
+	if (winVars.mainWin)
+		SetWindowText(winVars.mainWin,name);
+}
+
+// Time Stamping Functions (x86 Specific)
+/ *
+unsigned INT64 timestamp[maxtimestamps];
+#define rdtsc __asm _emit 0x0f __asm _emit 0x31  // rdtsc - Read time stamp counter
+
+void inittimestamp(void)
+{	_asm { push eax
+		   push edx
+		   push edi
+		   rdtsc
+		   mov  edi,offset tstamp
+		   mov	[edi],edx
+		   mov	[edi+4],eax
+		   pop  edi
+		   pop  edx
+		   pop  eax
+		}
+}
+
+void stamptime(vlong *dest)
+{	_asm { push eax
+		   push edx
+		   push edi
+		   rdtsc
+		   mov  edi,offset currtime
+		   mov	[edi],edx
+		   mov	[edi+4],eax
+		   pop  edi
+		   pop  edx
+		   pop  eax
+		}
+	currtime-=tstamp;
+	if (dest)
+		*dest=currtime;
+	tstamp+=currtime;
+}
+* /
+
+//------------------------- System Registry ----------------------------------------------
+bool getregistrypermission(char *msg,bool *permission)
+{	int ret;
+
+	if(*permission)	return true;
+	ret = MessageBox(NULL, msg,"Reclaim File Types?", MB_YESNO|MB_ICONQUESTION);
+	if(ret == IDYES)
+		*permission = true;
+	return *permission;
+}
+
+bool associatefile(const char *extension,const char *ownerprogram,const char *filedescription,bool *permission)
+{	return false;
+}
+*/
+
+// ------------------------- checkmsg API Command ------------------------------
+void checkmsg(void)
+{	XEvent event;
+	while (XPending(linuxVars.dpy) > 0)
+	{	XNextEvent(linuxVars.dpy, &event);
+		handleEvent(&event);
+	}
+}
+
+void waitmsg(void)
+{	XEvent event;
+	checkmsg();								// Clear out any waiting messages
+//	XNextEvent(linuxVars.dpy, &event);		// Block until a new message arrives	### Not working as yet
+//	handleEvent(&event);
+}
+
+/*
+// ------------------------- checkmsg API Command ------------------------------
+void checkmsg(void)
+{	MSG	 xmsg;			// Windows messaging variable
+	intf retval;
+
+	if (applicationState == AppState_Initializing) return;
+
+	do
+	{	// Process all messages
+		while( PeekMessage( &xmsg, NULL, 0, 0, PM_NOREMOVE ) )
+		{	retval=GetMessage( &xmsg, NULL, 0, 0 );
+			if( !retval )
+				return; // WM_QUIT value received ... close the app
+			if (retval==-1)
+				msg("Message Handling Error","GetMessage returned an error");
+			//TranslateMessage(&xmsg);
+			DispatchMessage(&xmsg);
+		}
+		if (applicationState==AppState_notFocused)
+			waitmsg();
+//		if (applicationState==AppState_Restoring)
+//		{	apprestore();
+//		}
+	} while (applicationState!=AppState_running);
+}
+
+void waitmsg(void)
+{	MSG	 xmsg;			// Windows messaging variable
+	intf retval;
+
+	if (applicationState == AppState_Initializing) return;
+
+	do
+	{
+		// Keep processing messages until they're all done
+		while( PeekMessage( &xmsg, NULL, 0, 0, PM_NOREMOVE ) )
+		{	retval=GetMessage( &xmsg, NULL, 0, 0 );
+			if( !retval )
+				return; // WM_QUIT value received ... close the app
+			if (retval==-1)
+				msg("Message Handling Error","GetMessage returned an error");
+			//TranslateMessage(&xmsg);
+			DispatchMessage(&xmsg);
+		}
+
+		// Wait for a message
+		retval=GetMessage( &xmsg, NULL, 0, 0 );
+		if( !retval )	return; // WM_QUIT value received ... close the app
+		if (retval==-1)	msg("Message Handling Error","GetMessage returned an error");
+		//TranslateMessage(&xmsg);
+		DispatchMessage(&xmsg);
+
+		// Keep processing messages until they're all done
+		while( PeekMessage( &xmsg, NULL, 0, 0, PM_NOREMOVE ) )
+		{	retval=GetMessage( &xmsg, NULL, 0, 0 );
+			if( !retval )
+				return; // WM_QUIT value received ... close the app
+			if (retval==-1)
+				msg("Message Handling Error","GetMessage returned an error");
+			//TranslateMessage(&xmsg);
+			DispatchMessage(&xmsg);
+		}
+
+//		if (applicationState==AppState_Restoring)
+//		{	apprestore();
+//		}
+	} while (applicationState!=AppState_running);
+}
+*/
+
+// timerproc is called whenever a timer event occurs
+extern void (*timertask)(void);
+void fcTimerTick(void);
+uintf timerSemaphore = 0;
+itimerval tout_val;
+int globaltimer = 0;
+
+XEvent timerMsg;
+
+void timerproc(int i)
+{	//setitimer(ITIMER_REAL, &tout_val,0);
+	signal(SIGALRM,timerproc);
+	timerSemaphore++;
+	if (timerSemaphore>1)
+	{	timerSemaphore--;
+		return;
+	}
+	if (timerMsg.xclient.window)
+	{	XSendEvent(linuxVars.dpy, linuxVars.mainWin, false, StructureNotifyMask, &timerMsg);		// 	PostMessage(winVars.mainWin,WM_TIMERTICK,0,0);
+	}
+//	if (applicationState==AppState_running || applicationState==AppState_preGFX)
+		fcTimerTick();
+	timerSemaphore--;
+}
+
+// ------------------------ setTimerTask Command -----------------------------
+void setTimerTask(void taskadr(void),intf ticks)
+{
+	#ifdef fcdebug
+		if (ticks<1) msg("Debug Error","Call to 'set_timer_task' with an invalid parameter ( Less than 1 )");
+	#endif
+
+	timertask=taskadr;
+
+	tout_val.it_interval.tv_sec = 0;
+	tout_val.it_interval.tv_usec = 1000000/ticks;
+	tout_val.it_value.tv_sec = 0;
+	tout_val.it_value.tv_usec = 1000000/ticks;
+	setitimer(ITIMER_REAL, &tout_val,0);
+	signal(SIGALRM,timerproc); /* set the Alarm signal capture */
+}
+
+/*
+extern char errorOnExitTxt[];
+// ------------------------ exitfc API Command ---------------------------------
+void exitfc(void)
+{   _exitfc();
+	term_func();
+	set_terminate(old_term_function);	// This isn't necessary but it's here just in case
+	if (errorOnExitTxt[0]) MessageBox(NULL,(char *)errorOnExitTxt,"FC Engine",MB_OK | MB_ICONEXCLAMATION );
+	exit(0);
+}
+
+// ************************************************************************************
+// ***							Windows Initialization								***
+// ************************************************************************************
+*/
+// ------------------------------- WinMain -------------------------------------
+bool linuxEngineInit(int argc, char **argv)	// (HINSTANCE hinst, LPSTR _cmdline, int ncmdshow)
+{//	old_term_function = set_terminate(term_func);
+    linuxVars.dpy = XOpenDisplay(0);
+
+	timerMsg.xclient.display = linuxVars.dpy;
+	timerMsg.xclient.message_type = XInternAtom(linuxVars.dpy, "MyTimer", 0);
+	timerMsg.xclient.window = 0;
+	timerMsg.xclient.send_event = true;
+	timerMsg.xclient.format = 8;
+	timerMsg.xclient.data.b[0] = 0;
+	timerMsg.type = ClientMessage;
+
+	linuxVars.screen = 0;
+	linuxVars.parentWin = 0;
+	linuxVars.mainWin = 0;
+	linuxVars.changeSize = NULL;
+	linuxVars.deactivate = NULL;
+	linuxVars.isFullScreen = false;		// True if engine is running in window mode, false for fullscreen
+	linuxVars.minVersion = 1000;		// Modules must be at least version 1.000 to interface with this program
+	linuxVars.appActive = 0;
+
+	OS_cacheMouseBut = 0;
+	OS_cacheMouseWheel = 0;
+
+/*
+//	intf		winPosX,winPosY;		// Co-Ordinates of the top left corner of the client area of the app's window
+	XF86VidModeModeInfo desktopMode;	// Mode of the desktop prior to launching this program
+	XSetWindowAttributes attr;			// Attributes of our window
+
+    int x, y;
+    unsigned int width, height;
+    unsigned int depth;
+
+	// Callback functions
+	void (*deactivate)(void);				// Called when the window is deactivated (ALT-TAB out of the app)
+	void (*changeSize)(uintf w, uintf h);	// Called when the window is resized
+*/
+	getcwd(runpath, 256);								// Can't use sizeof because it's externed as runpath[]
+	printf("CWD: %s\n",runpath);
+	txtcpy(programflname, 256, argv[0]);
+	fileNameInfo(programflname);
+	txtcpy(programName, 128,fileactualname);
+	printf("argv[0] = %s\n",argv[0]);
+	printf("programName = %s\n",fileactualname);
+	printf("filePath = %s\n",filepath);
+
+	chdir(filepath);
+//	cmdline = _cmdline;
+/*
+	txtcpy(graphicsDriverFileName,sizeof(graphicsDriverFileName),"OpenGL.vdd");
+*/
+	// Create the 'logs' folder, and delete the 'logs/exit.log' file.
+	mkdir("logs",0777);
+	if (!remove("logs/exit.log"))
+	{	// The exit.log file either does not exist, or it is write protected.  If it is write
+		// protected, the structure of the FC engine will cause a serious error.  We exit with an error instead
+//		if (error!=2)	// Error 2 = File not found, that is OK.
+		{	msg("Program Startup Failure",buildstr("The file LOGS\\EXIT.LOG could not be removed\nPossibly because it is set as read-only\nmeaning that other log files might be too\n\nIf this is the case, it is simply too dangerous to proceed\nDebug Error : %i",errno));
+			return false;
+		}
+	}
+
+	// Initialize timer
+	setTimerTask(NULL,100);
+
+	// Determine Desktop Metrics (width, height, depth)
+	// This code retrieves the size of the ROOT window, which may be the desktop dimensions of a multi-screen display
+	Display* pdsp = NULL;
+    Window wid = 0;
+    XWindowAttributes xwAttr;
+
+    pdsp = XOpenDisplay( NULL );
+    if ( !pdsp )
+    {   msg("Program Startup Failure", "Failed to open default display.\n");
+        return false;
+    }
+
+    wid = DefaultRootWindow( pdsp );
+    if ( 0 > wid )
+    {   msg("Program Startup Failure", "Failed to obtain the root window of the default display.\n");
+        return false;
+    }
+
+    Status ret = XGetWindowAttributes( pdsp, wid, &xwAttr );
+    _desktopMetrics.width = xwAttr.width;
+    _desktopMetrics.height= xwAttr.height;
+	_desktopMetrics.depth = xwAttr.depth;
+    XCloseDisplay( pdsp );
+	if (_desktopMetrics.depth == 8)	 _desktopMetrics.depth = 16;  // can't render to  8 bit surfaces
+	if (_desktopMetrics.depth == 24) _desktopMetrics.depth = 32;  // can't render to 24 bit surfaces
+	desktopMetrics = &_desktopMetrics;
+
+/*
+	// Obtain environment variables
+	char buffer[256];
+	GetEnvironmentVariable("NUMBER_OF_PROCESSORS",&buffer[0],256);
+	numCPUs = atoi(buffer);
+
+	inittimestamp();
+
+	winVars.appicon = LoadIcon( winVars.hinst, MAKEINTRESOURCE(101));			// 101 = first resource in resource file
+	if (!winVars.appicon) winVars.appicon = LoadIcon( winVars.hinst, IDI_APPLICATION);
+
+	// Register Window style
+	winVars.wc.style			= 0;							// OpenGL - CS_HREDRAW | CS_VREDRAW | CS_OWNDC;
+	winVars.wc.lpfnWndProc		= winVars.winProc;
+	winVars.wc.cbClsExtra		= 0;
+	winVars.wc.cbWndExtra		= 0;
+	winVars.wc.hInstance 		= winVars.hinst;
+	winVars.wc.hIcon			= winVars.appicon;
+	winVars.wc.hCursor			= LoadCursor(NULL, IDC_ARROW);
+	winVars.wc.hbrBackground	= (HBRUSH)COLOR_INACTIVEBORDER; // OpenGL - NULL
+	winVars.wc.lpszMenuName		= NULL;
+	winVars.wc.lpszClassName	= "FlameVM_ClientWindow";
+*/
+	fclaunch();
+	return true;
+}
+
+/*
+void ShutdownFC(void)
+{
+#ifdef EMBEDED_UTIL
+	_exitfc();
+#endif
+	term_func();
+	set_terminate(old_term_function);			// This isn't necessary but it's here just in case
+	if (errorOnExitTxt[0]) MessageBox(NULL,(char *)errorOnExitTxt,"FC Engine",MB_OK | MB_ICONEXCLAMATION );
+}
+
+#ifdef EMBEDED_UTIL
+bool InitFC(HINSTANCE hinst, LPSTR _cmdline, int ncmdshow,HWND parentwin)
+{	winVars.parentWin = parentwin;
+	return win32EngineInit(hinst, _cmdline, ncmdshow);
+}
+#else
+*/
+
+int main(int argc, char **argv)
+{	if (linuxEngineInit(argc,argv))
+	{	fcmain();
+		_exitfc();
+	}
+	return 0;
+}
+
+/*int WINAPI WinMain(HINSTANCE hinst, HINSTANCE, LPSTR _cmdline, int ncmdshow)
+{	if (win32EngineInit(hinst, _cmdline, ncmdshow))
+	{	fcmain();
+		_exitfc();
+	}
+
+	ShutdownFC();
+	return 0;
+}
+
+#endif
+
+void startupwarning(const char *title, const char *message)
+{	MessageBox(winVars.mainWin,title,message, MB_OK | MB_ICONEXCLAMATION );
+}
+
+struct winDynamicLib
+{	sDynamicLib plugin;
+	HINSTANCE hinst;
+};
+
+sDynamicLib *loadDynamicLib(char *filename) // Load a dynamic library from disk.  In most cases, you will only want to use a FlameVM binary.  Where you know the FlameVM compiler is available, you may use a source code file.  Keep in mind any licensing restrictions regarding the distribution of the FlameVM compiler.
+{	char *funcToFind = "initLibrary";
+	winDynamicLib *plugin = (winDynamicLib *)fcalloc(sizeof(winDynamicLib), filename);
+	plugin->plugin.oemInformation = plugin;
+
+	fileNameInfo(programflname);
+	if (txticmp(fileextension, "vdd")==0)
+	{	funcToFind = "vd_init3D";
+	}
+
+	plugin->hinst = LoadLibrary(filename);
+	if (plugin->hinst)
+	{	plugin->plugin.initLibrary = (void *(*)(void))GetProcAddress(plugin->hinst,funcToFind);
+	}	else
+	{	char errtxt[256];
+		tprintf(errtxt,256,"Unable to load plugin: %s",filename);
+		msg("Fatal Error",errtxt);
+	}
+	return &plugin->plugin;
+}
+
+void freeDynamicLib(sDynamicLib *library)	 // Free the loaded Dynamic Library from memory.  The library may not be freed immediately if it is not safe to do so.
+{	winDynamicLib *p = (winDynamicLib *)(library->oemInformation);
+	FreeLibrary(p->hinst);
+	fcfree(p);
+}
+
+// Notes for future features
+// Use GetVolumeInformation to obtain the hard drive's serial number  :)
+*/
